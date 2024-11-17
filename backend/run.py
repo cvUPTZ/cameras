@@ -3,7 +3,7 @@ import uvicorn
 
 if __name__ == "__main__":
     uvicorn.run(
-        "server:app",
+        "main:asgi_app",  # Use asgi_app instead of app
         host="0.0.0.0",
         port=8000,
         reload=True,

@@ -18,3 +18,9 @@ export interface Stat {
   value: string;
   icon: React.ComponentType;
 }
+
+export interface DvrConfig {
+  ip: string;
+  username: string;
+  password: string;
+}
