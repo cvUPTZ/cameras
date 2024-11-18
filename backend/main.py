@@ -1,4 +1,4 @@
-# backend/main.py
+#main.py
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
@@ -11,108 +11,85 @@ import socketio
 from datetime import datetime
 from database import Database
 from camera_manager import CameraManager
-from models import DvrCredentials, AlertData
 import os
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 load_dotenv()
 
-# Define allowed origins
-ALLOWED_ORIGINS = [
-    "http://localhost:5173",  # Vite dev server default port
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",  # In case you use a different port
-    "*"  # Or any other origins you need
-]
+class DvrConfig(BaseModel):
+    ip: str
+    username: str
+    password: str
 
-# Create the FastAPI app first
+# Create FastAPI app
 app = FastAPI()
 
-# Add CORS middleware
+# Configure CORS for FastAPI first
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Socket.IO setup with explicit CORS configuration
+# Configure Socket.IO
 sio = socketio.AsyncServer(
     async_mode='asgi',
-    cors_allowed_origins=ALLOWED_ORIGINS,  # Use the same origins here
+    cors_allowed_origins=['*'],
     logger=True,
     engineio_logger=True
 )
 
-# Create the ASGI app
-asgi_app = socketio.ASGIApp(socketio_server=sio, other_asgi_app=app)
-
-
-# Global instances
+# Create ASGI app by wrapping the FastAPI app
+asgi_app = socketio.ASGIApp(
+    socketio_server=sio,
+    other_asgi_app=app
+)
+# Initialize components
 detector = TheftDetector()
 db = Database()
 camera_manager = CameraManager()
-dvr_config = {
-    "ip": os.getenv('DVR_IP'),
-    "username": os.getenv('DVR_USERNAME'),
-    "password": os.getenv('DVR_PASSWORD')
-}
 
 @app.on_event("startup")
 async def startup_event():
+    """Initialize components on startup"""
     await db.initialize()
-    try:
-        await camera_manager.initialize(
-            dvr_config["ip"],
-            dvr_config["username"],
-            dvr_config["password"]
-        )
-    except Exception as e:
-        print(f"Failed to initialize camera manager: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    """Cleanup on shutdown"""
     await camera_manager.close()
 
-@app.post("/api/configure-dvr")
-async def configure_dvr(credentials: DvrCredentials):
-    try:
-        await camera_manager.close()
-        await camera_manager.initialize(
-            credentials.ip,
-            credentials.username,
-            credentials.password
-        )
-        dvr_config.update({
-            "ip": credentials.ip,
-            "username": credentials.username,
-            "password": credentials.password
-        })
-        cameras = await camera_manager.get_camera_list()
-        return {
-            "status": "success",
-            "message": "DVR configured successfully",
-            "cameras": cameras
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to configure DVR: {str(e)}"
-        )
+@sio.event
+async def connect(sid, environ):
+    print(f"Client connected: {sid}")
+    await sio.emit('connection_status', {'status': 'connected'}, room=sid)
 
-@app.get("/api/cameras")
+@sio.event
+async def disconnect(sid):
+    print(f"Client disconnected: {sid}")
+
+@app.post("/dvr/configure")
+async def configure_dvr(config: DvrConfig):
+    try:
+        await camera_manager.initialize(config.ip, config.username, config.password)
+        return {"status": "success", "connected": True, "message": "DVR configured successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/alerts")
+async def get_alerts():
+    alerts = await db.get_recent_alerts()
+    return {"alerts": alerts}
+
+@app.get("/cameras")
 async def get_cameras():
-    try:
-        cameras = await camera_manager.get_camera_list()
-        return {"cameras": cameras}
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to get camera list: {str(e)}"
-        )
+    cameras = await camera_manager.get_camera_list()
+    return {"cameras": cameras}
 
-@app.post("/api/analyze")
+@app.post("/analyze")
 async def analyze_frame(file: UploadFile = File(...)):
     try:
         contents = await file.read()
@@ -126,12 +103,42 @@ async def analyze_frame(file: UploadFile = File(...)):
             "data": results
         }
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Analysis failed: {str(e)}"
-        )
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
-@app.get("/api/health")
+@app.get("/socket-health")
+async def socket_health():
+    return {
+        "status": "healthy",
+        "socket_connected": True,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    
+@app.get("/stream/{camera_id}/start")
+async def start_stream(camera_id: int):
+    success = await camera_manager.start_stream(camera_id)
+    if success:
+        return {"status": "success", "message": "Stream started"}
+    return {"status": "error", "message": "Failed to start stream"}
+
+@app.get("/stream/{camera_id}/stop")
+async def stop_stream(camera_id: int):
+    success = await camera_manager.stop_stream(camera_id)
+    if success:
+        return {"status": "success", "message": "Stream stopped"}
+    return {"status": "error", "message": "Failed to stop stream"}
+
+@app.get("/camera/{camera_id}/snapshot")
+async def get_snapshot(camera_id: int):
+    snapshot = await camera_manager.get_snapshot(camera_id)
+    if snapshot:
+        return {"status": "success", "data": snapshot}
+    return {"status": "error", "message": "Failed to get snapshot"}
+
+@app.get("/health")
 async def health_check():
     try:
         cameras = await camera_manager.get_camera_list()
@@ -142,12 +149,7 @@ async def health_check():
                 "detector": detector is not None,
                 "database": db is not None,
                 "cameras": len(cameras),
-                "socketio": sio is not None,
-                "dvr_configured": all([
-                    dvr_config["ip"],
-                    dvr_config["username"],
-                    dvr_config["password"]
-                ])
+                "socketio": sio is not None
             }
         }
     except Exception as e:
@@ -155,13 +157,3 @@ async def health_check():
             "status": "unhealthy",
             "error": str(e)
         }
-
-# Socket.IO events
-@sio.event
-async def connect(sid, environ):
-    print(f"Client connected: {sid}")
-    await sio.emit('connection_status', {'status': 'connected'}, room=sid)
-
-@sio.event
-async def disconnect(sid):
-    print(f"Client disconnected: {sid}")

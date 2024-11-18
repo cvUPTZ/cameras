@@ -5,6 +5,12 @@ import { mockCameras, mockStats } from '../services/mockData';
 import { config } from '../config';
 import { io, Socket } from 'socket.io-client';
 
+interface DvrConfig {
+  ip: string;
+  username: string;
+  password: string;
+}
+
 interface AppContextType {
   selectedCamera: number;
   setSelectedCamera: (id: number) => void;
@@ -14,6 +20,8 @@ interface AppContextType {
   systemHealth: boolean;
   isLoading: boolean;
   socketConnected: boolean;
+  dvrConnected: boolean;
+  updateDvrConfig: (config: DvrConfig) => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -26,7 +34,32 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [systemHealth, setSystemHealth] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [socketConnected, setSocketConnected] = useState(false);
+  const [dvrConnected, setDvrConnected] = useState(false);
   const [socket, setSocket] = useState<Socket | null>(null);
+
+  const updateDvrConfig = async (dvrConfig: DvrConfig) => {
+    try {
+      const response = await fetch(`${config.API_URL}/dvr/configure`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(dvrConfig),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to update DVR configuration');
+      }
+
+      const data = await response.json();
+      setDvrConnected(data.connected);
+      return data;
+    } catch (error) {
+      console.error('Error updating DVR config:', error);
+      setDvrConnected(false);
+      throw error;
+    }
+  };
 
   // Initialize Socket.IO connection
   useEffect(() => {
@@ -37,12 +70,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const connectSocket = () => {
       try {
         const newSocket = io(config.API_URL, {
-          transports: ['websocket'],
+          transports: ['websocket', 'polling'],  // Allow fallback to polling
           path: '/socket.io/',
           reconnectionAttempts: maxRetries,
           reconnectionDelay: retryDelay,
           autoConnect: true,
-          timeout: 10000
+          timeout: 10000,
+          withCredentials: true  // Add this
         });
 
         newSocket.on('connect', () => {
@@ -158,7 +192,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         stats,
         systemHealth,
         isLoading,
-        socketConnected
+        socketConnected,
+        dvrConnected,
+        updateDvrConfig
       }}
     >
       {children}

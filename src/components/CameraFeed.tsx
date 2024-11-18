@@ -19,7 +19,7 @@ export function CameraFeed() {
         ) : (
           <>
             <img 
-              src={currentCamera?.streamUrl}
+              src={currentCamera?.stream_url}
               alt="Camera Feed"
               className="w-full h-full object-cover"
             />
